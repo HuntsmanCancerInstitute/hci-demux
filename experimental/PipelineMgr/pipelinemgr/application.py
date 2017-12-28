@@ -1,0 +1,134 @@
+import sys
+import re
+import os
+
+# Import the module for System V semaphores.
+try:
+	import sysv_ipc
+except ImportError:
+	sys.stderr.write("%s requires module sysv_ipc. See http://semanchuk.com/philip/sysv_ipc/." % sys.argv[0] )
+	sys.exit(1)
+
+from . import pipelineparams
+from .logger import Logger
+from . import db
+from . import run
+from .state import State
+
+class Application(Logger):
+	"""
+	This object oversees processing of all sequencing runs.
+	"""
+	def __init__(self):
+		# Acquire the semaphore.
+		self.Log("Acquiring semaphore.")
+		flags = sysv_ipc.IPC_CREX
+		initial = 1
+		self.sem = sysv_ipc.Semaphore(key=pipelineparams.keyval, flags=flags, initial_value=initial)
+		self.sem.acquire(timeout=0)
+	
+	def OpenDb(self):
+		"""
+		Open the database.
+		"""
+		self.dbconnection=db.DbOpen()
+	
+	def GetAllRuns( self ):
+		"""
+		Returns list of all known runs in database.
+		"""
+		c = self.dbconnection.cursor()
+		c.execute("select id,run_directory,state from run")
+		recs = c.fetchall()
+		return recs
+
+	def ClearOldRunsFromDb(self):
+		"""
+		Clean any old and deleted runs out of the database. Any
+		Run in the database that doesn't appear on the filesystem
+		can be removed from the database.
+		"""
+		# Get all the runs out of the database.
+		c = self.dbconnection.cursor()
+		# For each run...
+		for (id,run_directory,state) in self.GetAllRuns():
+			# ... if not present on the file system...
+			if not os.path.exists(run_directory):
+				# ... remove the record from the database.
+				self.Log("Deleting old run %s (%s) from database." % (id,run_directory))
+				c.execute("delete from run where id = ?",(id,))
+				self.dbconnection.commit()
+
+	def DiscoverNewRuns(self):
+		"""
+		Look for any new runs on the filesystem. Enter them into the 
+		database in the starting state.
+		"""
+		# Find subdirectories in the runs directory(s) whose name 
+		# matches the regular expression.
+		known_run_ids = [x[0] for x in self.GetAllRuns()]
+
+		new_runs = []
+		# Pattern consists of Date_SequencerName_RunNumber_Flowcell.
+		# Pattern updated to match both HiSeq and MiSeq runs.
+		# Brett Milash 3/20/2015.
+
+		# Use this pattern to find both Hiseq and Miseq runs:
+		pattern = re.compile("[0-9]*_[A-Z0-9]*_[0-9]*_[A-Z0-9-]*$")
+
+		# Use this pattern to find only Hiseq runs:
+		#pattern = re.compile("[0-9]*_[A-Z0-9]*_[0-9]*_[AB][A-Z0-9]*")
+
+		for runs_dir in pipelineparams.run_directories:
+			for subdir in os.listdir(runs_dir):
+				run_full_path=os.path.join(runs_dir,subdir)
+				if not os.path.isdir(run_full_path):
+					# Skip non-directory files.
+					continue
+				if pattern.match(subdir):
+					# Found a runs folder.
+					if subdir not in known_run_ids:
+						# Discovered a new run folder. 
+						new_runs.append((subdir,run_full_path))
+					else:
+						self.Log(["Subdirectory",subdir,"already known."])
+		if new_runs:
+			for (subdir,run_full_path) in new_runs:
+				try:
+					seqrun = run.Run(subdir,run_full_path)
+				except:
+					(exc_type, exc_value, exc_traceback)=sys.exc_info()
+					self.Log("Caught exception %s, %s during creation of Run for %s." % ( exc_type.__name__, exc_value, subdir))
+				else:
+					seqrun.DbAdd( self.dbconnection )
+					self.Log(["Discovered run",subdir])
+		else:
+			self.Log("No new sequencing runs.")
+
+	def ProcessKnownRuns(self):
+		"""
+		This method handles each run, moving it forward through the
+		series of states.
+		"""
+		for (subdir,run_directory,state) in self.GetAllRuns():
+			seqrun = run.Run(subdir,run_directory,State(state))
+			seqrun.Process(self.dbconnection)
+
+	def CloseDb(self):
+		"""
+		Close the database.
+		"""
+		db.DbClose(self.dbconnection)
+
+	def Go(self):
+		self.OpenDb()
+		self.ClearOldRunsFromDb()
+		self.DiscoverNewRuns()
+		self.ProcessKnownRuns()
+		self.CloseDb()
+
+	def __del__(self):
+		# Release and remove the semaphore.
+		self.Log("Releasing semaphore.")
+		self.sem.release()
+		self.sem.remove()

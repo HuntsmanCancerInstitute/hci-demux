@@ -1,0 +1,6 @@
+# 
+# hci-demux crontab entry to run pipelines hourly. 
+#
+#
+23 * * * *       cd $HOME/Software/hci-demux; ./process_pipelines.sh > ./process_pipelines.out 2>&1
+

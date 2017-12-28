@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# RunProcessor - code to automate processing Illumina sequencing runs.
+
+import sys
+import socket
+import time
+import re
+import os
+
+import gnomex
+import pipelineparams
+from logger import Logger
+from emailer import Emailer
+
+
+# Classes defining the number of reads:
+
+class PairedEndRun(object):
+	def PrintRunType(self):
+		print "Run type: paired-end"
+
+class SingleEndRun(object):
+	def PrintRunType(self):
+		print "Run type: single-end"
+
+# Classes defining the bar coding processing scheme:
+
+class SingleMismatch(object):
+	"""
+	This is the default bar code processing scheme. All bar code
+	reads are commbined into a single string, and one sequencing
+	error is permitted while matching to expected bar codes.
+	"""
+	def DemultiplexingScheme(self):
+		print "Demultiplexing: single mismatch using all bar code reads."
+
+class NoMismatch(object):
+	"""
+	This demultiplexing scheme permits no mismatches using all bar code reads.
+	"""
+	def DemultiplexingScheme(self):
+		print "Demultiplexing: no mismatches allowed using all bar code reads."
+
+class NoDemultiplexing(object):
+	"""
+	No demultiplexing performed. Bar code reads converted to Fastq.
+	"""
+	def DemultiplexingScheme(self):
+		print "Demultiplexing: no demultiplexing. All bar code reads will be converted to Fastq format."
+
+class MolecularBarcodeDemultiplexing(object):
+	"""
+	Demultiplexing on first bar code read. Second bar code read is
+	converted to Fastq and is used as a molecular bar code.
+	"""
+	def DemultiplexingScheme(self):
+		print "Demultiplexing: single mismatch in first bar code read. Second bar code read converted to Fastq."
+
+# Classes defining the sequencing instrument:
+
+class HiSeqRun(object):
+	def PrintInstrument(self):
+		print "Instrument: HiSeq"
+
+	def ConvertBclFiles(self):
+		raise NotImplementedException
+
+class MiSeqRun(object):
+	def PrintInstrument(self):
+		print "Instrument: MiSeq"
+
+	def ConvertBclFiles(self):
+		raise NotImplementedException
+
+# Class that represents one sample in the sequencing run:
+
+class SeqSample(object):
+	"""
+	SeqSample represents one sample in a sequencing run. Together, all the
+	SeqSample objects for a run contain all the information needed to create
+	the sample sheet for the run.
+	"""
+	def __init__(self, flowcell_barcode, lane, sample_id, genome, sample_barcode, first_name, last_name, request_number ):
+		self.flowcell_barcode=flowcell_barcode
+		self.lane=lane
+		self.sample_id=sample_id
+		self.genome=genome
+		self.sample_barcode=sample_barcode
+		self.first_name=first_name
+		self.last_name=last_name
+		self.request_number=request_number
+
+	def WriteSampleSheetRow( self, ofs ):
+		# Regular row. Write it to the file.
+		row = [ self.flowcell_barcode,`self.lane`,self.sample_id,EraseCommas(self.genome) or 'None',self.sample_barcode or '',EraseCommas(self.first_name+' '+self.last_name),'N','RI','Sandy',self.request_number ]
+		ofs.write(','.join(row)+'\n')
+
+# Class providing the run processing capability:
+
+class RunProcessor(object,Logger,Emailer):
+	"""
+	A RunProcessor object handles BCL conversion, demultiplexing, 
+	and data distribution for one or more lanes of a flow cell that have
+	identical characteristics, ie # of data reads, # of bar code reads,
+	bar code lengths, demultiplexing strategy, etc.
+	"""
+
+	def __init__(self,run_dir,num_reads,samples):
+		self.run_directory=run_dir
+		self.id=os.path.split(self.run_directory)[-1]
+		self.gnomex_connection = GNomEx.GNomExConnection().GnConnect(pipelineparams.db_user,pipelineparams.db_password)
+		self.samples=samples[:]
+
+		# Open PipelineMgr database that tracks processing of runs. If it doesn't
+		# exist yet, create it.
+		if self.DbExists():
+			self.DbOpen()
+		else:
+			self.DbCreate()
+		self.InitializeCoreFacility()
+
+	def FromAddr( self ):
+		"""
+		Returns from address for emailing purposes.
+		"""
+		# Unix account under which PipelineMgr.py runs.
+		username = os.environ['LOGNAME']
+		return username + "@" + socket.getfqdn()
+
+	def DbExists( self ):
+		"""Checks if PipelineMgr database file exists."""
+		return os.path.exists(pipelineparams.db_file_name)
+
+	def DbCreate( self ):
+		"""Create and open the database."""
+		self.Log("Creating database.")
+		self.DbOpen()
+		c = self.db_connection.cursor()
+
+		# Create runs table.
+		c.execute("create table run (id primary key,dirname,state)")
+		self.db_connection.commit()
+
+		c.close()
+		self.Log("Database creation complete.")
+
+	def DbOpen( self ):
+		"""Open the database."""
+		#self.Log("Opening database.")
+		self.db_connection = sqlite3.connect(pipelineparams.db_file_name)
+
+	def Describe(self):
+		print "Run directory:", self.run_directory
+		self.PrintInstrument()
+		self.PrintRunType()
+		self.PrintDemultiplexingScheme()
+		print "Sequencer finished:", self.SequencerFinished()
+		print
+
+	def SampleSheetName(self):
+		"""
+		Returns the name of the run's sample sheet.
+		"""
+		return os.path.join(self.run_directory,"created_samplesheet.csv")
+
+	def GetAllRunIds( self ):
+		"""Return list of all known run ids from database."""
+		c = self.db_connection.cursor()
+		c.execute("select id from run")
+		recs = c.fetchall()
+		runs = map( lambda x:x[0], recs )
+		return runs
+
+	def IsProcessed(self):
+		"""
+		Returns True if sequencing run has already been processed. This
+		is determined by finding the run in the sqlite database.
+		"""
+		return self.id in self.GetAllRunIds()
+
+	def CreateSampleSheet(self):
+		"""Creates sample sheet for multiplexed flow cell, and writes 
+		it to the run directory. 
+		Returns full path of sample sheet file name.
+		Changes for version 1.8 of CASAVA:
+			Added SampleProject column
+			altered other column names
+			write file to BaseCalls directory
+		4/3/2012: now permitting samples without barcodes. These samples will
+		have an Null values for the sample.barcode field, and no barcode
+		processing will happen for that lane.
+		5/16/2012: if only single sample is in a lane, the barcode for
+		that sample will be ignored, and it will be treated as if a single
+		non-barcoded sample is there. Doing this because sequence quality
+		for single barcodes is poor, and many clients just want all the
+		reads anyway.
+		11/28/2012: External customer Amplicon Express is submitting libraries
+		with 8-base custom barcodes. They submit libraries with any number of
+		samples ready for sequencing, but don't want to divulge which samples
+		are present. If registered user for Amplicon gets a lane, then the master
+		barcode sheet for Amplicon will be subsituted for that lane, so their
+		master spreadsheet will get used for every library they submit.
+		11/12/2013: Updated to handle paired bar codes.
+		03/06/2014: Updated to handle rapid runs. These runs are
+		registered in GnomEx as a single lane, but actually have 2
+		lanes of data (numbered 1 and 2). GNomEx does not support
+		this, so the pipeline is going to fake it by detecting these
+		flow cells, and adding a second lane (identical to the first)
+		in the sample sheet.
+		"""
+		# Generate sample sheet name. If it already exists just
+		# return its name. Doing this to make it easier to override
+		# the automatic sample sheet creation. Brett Milash, 10/11/2013.
+		samplesheet_fname = self.SampleSheetName()
+		if os.path.exists(samplesheet_fname):
+			return samplesheet_fname
+
+		# Open file
+		ofs = open(samplesheet_fname,'w')
+		# Write header.
+		header = ['FCID','Lane','SampleID','SampleRef','Index','Description','Control','Recipe','Operator','SampleProject']
+		ofs.write(','.join(header)+'\n')
+		# Count how many samples are in each lane.
+		sample_count = {}
+		for rec in results:
+			lane = rec[1]
+			try:
+				sample_count[lane]+=1
+			except KeyError:
+				sample_count[lane] = 1
+
+		# Write the results.
+		for sample in self.samples:
+			sample.WriteSampleSheetRow(ofs)
+
+		# Close file.
+		ofs.close()
+		# Close database.
+		connection.close()
+		# Return file name.
+		return samplesheet_fname
+
+	def Query( self, query ):
+		"""
+		Runs a SQL query against GNomEx, and retuns a cursor from
+		which the results can be retrieved.
+		"""
+		c = self.gnomex_connection.cursor()
+		c.execute(query)
+		return c
+
+	def InitializeCoreFacility( self ):
+		"""
+		InitializeCoreFacility identifies which core facility
+		started this run.
+		"""
+		self.corefacilityname = None
+		query="""select distinct facilityname
+		from corefacility
+		join flowcell on flowcell.idcorefacility = corefacility.idcorefacility
+		join flowcellchannel on flowcellchannel.idflowcell = flowcell.idflowcell
+		and flowcellchannel.filename = '%s';""" % self.id
+		recs=self.Query(query).fetchall()
+		try:
+			self.corefacilityname = recs[0][0]
+		except:
+			self.corefacilityname = 'Unknown'
+		self.Log("Run %s came from core facility '%s'." % (self.id,self.corefacilityname))
+
+	def NotifyLabStaff( self, subject, message ):
+		"""
+		Notify lab staff about a sequencing run issue.
+		"""
+		to_addr = pipelineparams.lab_staff_addresses[self.corefacilityname]
+		self.send_msg( self.FromAddr(), to_addr, subject, message )
+
+	def CheckRegistered( self ):
+		"""
+		Boolean function to test if run folder is actually registered in GNomEx.
+		"""
+		results=self.Query("select count(*) from flowcellchannel where filename = '%s'"%self.id).fetchall()
+		numlanes = results[0][0]
+		# Flow cells can now either have 8 lanes (HiSeq2500)
+		# or 1 lane (MiSeq or HiSeq2500 in rapid run mode). 
+		# Permit either of these styles of flow cell here.
+		if numlanes == 8 or numlanes == 1:
+			return True
+		else:
+			# If run is complete and flow cell still not 
+			# registered, send an urgent email.
+			if self.SequencerFinished():
+				subject = "Illumina Pipeline Problem! (%s)" % self.id
+				message = "The sequencing run %s is done, but the run folder has not been entered in GNomEx.\n" % self.id
+				message += "The pipeline cannot start until the flow cell has been entered into GNomEx.\n"
+				self.NotifyLabStaff( subject, message )
+			return False
+
+	def ProcessRun(self):
+		"""
+		Main method to call to process a run. This method calls all
+		the steps necessary, many of which will be provided by the other
+		classes.
+		"""
+		# Make sample sheet. - RunProcessor class.
+		# Convert BCL files. - Instrument class.
+		if not self.ConvertBclFiles():
+			self.Log("Run %s: BCL file conversion problem." % self.run_directory)
+			return False
+
+		# Merge BCL file batches.
+		# Rename data files.
+		# Distribute data files.
+		# Generate QC report.
+		# Notify that run is complete.
+
+		self.Log("Run %s processing completed." % self.run_directory)
+		return True
+
+
+def GetRunSamples(run_id):
+	"""
+	Queries GNomEx database for information about all samples in
+	a sequencing run. Returns a list of SeqSample objects.
+	"""
+	seqsamples=[]
+	gnomex_connection = GNomEx.GNomExConnection().GnConnect(pipelineparams.db_user,pipelineparams.db_password)
+
+	# Select lanes from flow cell that are bar coded.
+	c = gnomex_connection.cursor()
+	try:
+		query = """select flowcell.barcode,
+flowcellchannel.number,
+sample.number,
+genomebuild.genomebuildname,
+sample.barcodesequence,
+appuser.firstname, 
+appuser.lastname,
+request.number,
+sample.barcodesequenceb
+from flowcell
+join flowcellchannel on flowcellchannel.idflowcell=flowcell.idflowcell
+join sequencelane on sequencelane.idflowcellchannel = 
+	flowcellchannel.idflowcellchannel
+join sample on sequencelane.idsample = sample.idsample
+left outer join genomebuild on sequencelane.idgenomebuildalignto = 
+	genomebuild.idgenomebuild
+join request on sequencelane.idrequest = request.idrequest
+join appuser on request.idappuser = appuser.idappuser
+where flowcellchannel.filename = '%s'
+order by flowcellchannel.number, sample.number;""" % run_id
+		c.execute(query)
+	except pymssql.OperationError:
+		print query
+		raise
+	results = c.fetchall()
+	for rec in results:
+		flowcell_barcode = rec[0]
+		lane = rec[1]
+		sampleid=rec[2]
+		genome=rec[3]
+		sample_barcode=rec[4]
+		sample_barcode_b=rec[8]
+		if sample_barcode_b is not None:
+			sample_barcode = sample_barcode.strip()+'-'+sample_barcode_b.strip()
+		elif type(sample_barcode) == type(''):
+			sample_barcode = sample_barcode.strip()
+		fname=rec[5]
+		lname=rec[6]
+		rnum=rec[7]
+		seqsamples.append(SeqSample(flowcell_barcode,lane,sampleid,genome,sample_barcode,fname,lname,rnum))
+	c.close()
+	return seqsamples
+
+def CreateRunProcessor(run_full_path,run_name):
+	"""
+	Examines a run directory given its full path, and creates a RunProcessor
+	object to process it.
+	1. Get run details (instrument, # data reads, # barcode reads).
+	2. Get sample info. Needed to decide how to demultiplex, and later
+		to create sample sheet.
+	3. Select classes for instrument, run type, bar coding scheme, and
+		demultiplexing scheme.
+	4. Create the run processor object with classes selected in (3).
+	5. Process the run.
+	"""
+	Logger().Log("Creating a run processor for %s." % run_full_path)
+
+	# Get the details for the run.
+	( instrument, data_reads, barcode_reads, )=GetRunDetails(run_full_path)
+
+	# Get a list of samples on the run.
+	samples=GetRunSamples(run_name)
+
+	# Determine instrument for sequencing run. Using the LaneCount attribute
+	# of the FlowcellLayout tag in the RunInfo.xml file for this.
+	if instrument == 'miseq':
+		InstrumentClass=MiSeqRun
+	elif instrument == 'hiseq':
+		InstrumentClass=HiSeqRun
+
+	# Determine the number of reads class.
+	if data_reads == 1:
+		NumreadsClass=SingleEndRun
+	elif data_reads == 2:
+		NumreadsClass=PairedEndRun
+
+	# Determine the barcoding scheme.
+	BarcodeClass=SingleMismatch
+
+	# Make the RunProcessor class for the run.
+	objclass=type('runproc_'+run_name,(RunProcessor,InstrumentClass,NumreadsClass,BarcodeClass,),{})
+
+	# Make an instance of the RunProcessor for this run.
+	runproc_instance=objclass(run_full_path,data_reads+barcode_reads,samples)
+	runproc_instance.ProcessRun()

@@ -1,0 +1,253 @@
+import os
+import sys
+import traceback
+import socket
+import xml.dom.minidom
+
+import db
+from state import State
+from emailer import Emailer
+from logger import Logger
+from simultaneousjobrunner import SimultaneousJobRunner
+import pipelineparams
+
+
+class Run(Logger,Emailer,SimultaneousJobRunner):
+	"""
+	Run object represents one run folder.
+	"""
+	# State machine. This defines which method to call depending on the
+	# Run's current state, and the Run's next state depending on whether
+	# the method returns True or False.
+	# The format of these entries is:
+	# current_state : ( method_to_call, state_if_True, state_if_False )
+	# By convention, the method names referenced in the state machine begin
+	# with Sm. This just makes it easier to find them in the code.
+
+	statemachine={
+		State.new:( Run.SmCheckRegisteredVerbose,
+			State.wait_for_data,
+			State.wait_for_registration ),
+		State.wait_for_registration:( Run.SmCheckRegisteredSilent,
+			State.wait_for_data,
+			State.wait_for_registration ),
+		State.wait_for_data:( Run.SmCheckTransferComplete,
+			State.pipeline,
+			State.wait_for_data ),
+		State.pipeline:( Run.SmRunPipeline,
+			State.complete,
+			State.error ),
+		State.reprocess:( Run.SmReprocess,
+			State.pipeline,
+			State.error ),
+		#State.complete:(method,t_state,f_state),
+		#State.error:(method,t_state,f_state),
+	}
+
+	def __init__(self,id,run_directory,state=state.State.new):
+		self.id=id
+		self.run_directory=run_directory
+		self.state=state
+		self.GetRunDetails()
+		self.done_file=os.path.join(self.run_directory,"Basecalling_Netcopy_complete_Read%d.txt" % self.num_reads)
+
+	def GetRunDetails(self):
+		"""
+		Determines whether sequencing run was from a hiseq or miseq sequencer,
+		how many data reads (single-end vs paired-end) and how many index
+		reads (0, 1, or 2) the run had. 
+		Initializes instrument, data_reads, index_reads, and num_reads
+		values.
+		"""
+		doc = xml.dom.minidom.parse(os.path.join(self.run_directory,"RunInfo.xml"))
+		layout=doc.getElementsByTagName("FlowcellLayout")
+		# Determine what instrument. Doing this by lane count, which
+		# won't work if HiSeq instrument in rapid mode.
+		if int(layout[0].getAttribute("LaneCount")) == 8:
+			self.instrument='hiseq'
+		else:
+			self.instrument='miseq'
+
+		# Determine the number of data reads and index reads.
+		self.run_data_reads=0
+		self.run_index_reads=0
+		for tag in doc.getElementsByTagName("Read"):
+			if tag.getAttribute("IsIndexedRead") == 'N':
+				self.run_data_reads += 1
+				self.run_data_read_length = int(tag.getAttribute("NumCycles"))
+			elif tag.getAttribute("IsIndexedRead") == 'Y':
+				self.run_index_reads += 1
+				self.run_index_read_length = int(tag.getAttribute("NumCycles"))
+		self.run_num_reads=self.run_data_reads+self.run_index_reads
+
+	def FromAddr( self ):
+		"""
+		Returns from address for emailing purposes.
+		"""
+		# Unix account under which PipelineMgr.py runs.
+		username = os.environ['LOGNAME']
+		return username + "@" + socket.getfqdn()
+
+	def NotifyLabStaff( self, subject, message ):
+		"""
+		Notify lab staff about a sequencing run issue.
+		"""
+		to_addr = pipelineparams.lab_staff_addresses
+		self.send_msg( self.FromAddr(), to_addr, subject, message )
+	
+	def SmCheckRegisteredVerbose(self):
+		if self.SmCheckRegisteredSilent():
+			return True
+		else:
+			# Complain to lab staff, and log it.
+			self.Log(["PROBLEM! Run directory",self.id,"not registered correctly in GNomEx."])
+			# Notify the lab folks to correct the problem.
+			subject = "HiSeq Pipeline Problem! (%s)" % self.id
+			message = "The HiSeq run folder %s has not been entered in GNomEx.\n" % self.id
+			message += "Please check GNomEx to make sure the run folder was entered correctly.\n"
+			message += "Thanks, and have a nice day!\n"
+			self.NotifyLabStaff( subject, message )
+			return False
+	
+	def SmCheckRegisteredSilent(self):
+		"""
+		This method determines if the run has been registered in
+		GNomEx.
+		"""
+		return True
+	
+	def SmCheckTransferComplete(self):
+		"""
+		This method checks if the transfer of all files from the 
+		sequencer is done.
+		"""
+		return os.path.exists(self.done_file) or os.path.exists(self.done_file+".gz")
+	
+	def SmRunPipeline(self):
+		"""
+		SmRunPipeline creates one or more RunProcessors to perform
+		base calling, demultiplexing, and data distribution.
+		"""
+		# Create RunProcessor(s) for run.
+		runprocessors={}
+
+		# For each lane on flow cell ...
+			# ... get characteristics for lane, ie the
+			# number of data reads, number of index reads, the
+			# instrument, the demultiplex method, the use_bases 
+			# mask, the samples.
+			# try:
+				# Add the lane to the appropriate run processor
+			# except KeyError:
+				# create a run processor for the lane.
+				# Add the lane to it.
+
+		# Execute each RunProcessors' ProcessRun method.
+		for runprocessor in runprocessors.values():
+			runprocessor.ProcessRun()
+
+		# Clean up.
+		self.CompressFiles("*.bcl")
+		self.CompressFiles("*.txt")
+		self.CompressFiles("*.control")
+		return True
+	
+	def SmReprocess(self):
+		"""
+		SmReprocess prepares an already-processed run for reprocessing.
+		This is necessary if samples were mis-labeled in GNomEx for 
+		example.
+		"""
+		# Is it necessary to remove or rename the sample sheet?
+		self.UncompressFiles("*.bcl")
+		self.UncompressFiles("*.txt")
+		self.UncompressFiles("*.control")
+		return True
+
+	def RunShellCommand( self, command, pattern, numjobs=8 ):
+		"""
+		Runs command on all files matching pattern. Runs in 
+		parallel numjobs at a time, defaults to 8 concurrent jobs.
+		Limited to files to Data subdirectory of run directory.
+		"""
+		self.Log(["Running command", command, "on files matching pattern",pattern,"from run",self.id])
+		cmd = '/usr/bin/find %s -name "%s" -print' % ( os.path.join(self.run_directory,"Data"), pattern )
+		child_dir = self.run_directory
+		child_stderr=open(os.path.join(child_dir,"find.err"),'a')
+		p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE).stdout
+		for rec in p:
+			fname = rec.strip()
+			cmd = "%s '%s'" % (command,fname)
+			self.AddJob(cmd)
+		p.close()
+		self.RunJobs(numjobs,verbose=True)
+
+	def CompressFiles( self, pattern, numjobs=8 ):
+		"""Compresses files under run folder that match the given pattern."""
+		self.Log(["Compressing files matching",pattern,"from run",self.id])
+		self.RunShellCommand("/bin/gzip -f", pattern, numjobs )
+
+	def UncompressFiles( self, pattern, numjobs=8 ):
+		"""Unompresses files under run folder that match the given pattern."""
+		self.Log(["Uncompressing files matching",pattern,"from run",self.id])
+		self.RunShellCommand("/bin/gunzip", pattern, numjobs )
+
+
+	def DbAdd( self, dbconnection ):
+		"""
+		Inserts this Run object into database.
+		"""
+		c = dbconnection.cursor()
+		try:
+			c.execute("insert into run (id,run_directory,state) values (?,?,?)", (self.id,self.run_directory,self.state))
+		except TypeError:
+			print 'self.id',self.id
+			print 'self.run_directory',self.run_directory
+			print 'self.state',self.state
+			raise
+		dbconnection.commit()
+
+	def DbUpdate( self, dbconnection ):
+		"""
+		Stores run's state in database.
+		"""
+		c = dbconnection.cursor()
+		c.execute("update run set state=? where id=?", (self.state,self.id,))
+		dbconnection.commit()
+	
+	def Process(self,dbconnection):
+		"""
+		This method uses the state machine to call various Run methods
+		depending on the Run's current state.
+		"""
+		prev_state = None
+		# While the run is still making progress from state to state ...
+		while self.state != prev_state:
+			prev_state = self.state
+			try:
+				# ... get the method to call for the run's current
+				# state.
+				(method,success_state,fail_state) = self.statemachine[self.state]
+				# Set up a dictionary to map the method's return
+				# value to the run's next state.
+				next_state={
+					True:success_state,
+					False:fail_state,
+				}
+			
+				try:
+					# Call the method, and set the run's
+					# new state depending on the method's
+					# return value.
+					self.state = next_state[ method(self) ]
+					self.Log(["Run",self.id,"transitioned from",prev_state,"to",self.state])
+					# Store the runs' new state.
+					self.DbUpdate(dbconnection)
+				except:
+					# Handle exceptions thrown in method.
+					(etype,evalue,etraceback) = sys.exc_info()
+					details = traceback.format_exception( etype,evalue,etraceback)
+					self.Log(["Exception encountered processing",self.id,". Continuing with next run. Details:" ]+details)
+					break
+			except KeyError:
+				self.Log(["Skipping run",run.id,", no transitions from state", run.state])

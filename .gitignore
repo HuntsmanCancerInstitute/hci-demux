@@ -1,0 +1,13 @@
+# files used during development:
+check_imports.py
+process_pipelines.out
+hcidemux/pipelineparams.py
+experimental/PipelineMgr/pipelinemgr/pipelineparams.py
+pipelinemgr.db
+
+# test data:
+Repository/
+
+# compiled code:
+*.pyc
+
