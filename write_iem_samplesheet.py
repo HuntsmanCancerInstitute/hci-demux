@@ -52,12 +52,7 @@ def CleanRow(rec, sample_count, dirname):
         dr['index2'] = ''
     elif sample_count[lane] > 1 and not len(dr['index']):
         raise MissingBarcodeError('Multiple samples in lane but missing barcode for sample: ' + dr['Sample_ID'])
-
-    # Drop potential trailing integers on sequence request number 
-    # e.g. 1480R1 -> 14806R
-    # still works on clean sequence request number
-    dr['Sample_Project'] = dr['Sample_Project'].split('R')[0] + 'R'
-
+    
     row  = [dr['Lane'],dr['Sample_ID'],
             '_'.join([dr['Sample_ID'],dirname]),
             dr['Sample_Project'],
