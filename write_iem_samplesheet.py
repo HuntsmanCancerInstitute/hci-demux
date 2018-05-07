@@ -15,14 +15,10 @@ def EraseCommas(s):
 	else:
 		return s
 
-<<<<<<< HEAD
-def CleanRow(rec):
-=======
 class MissingBarcodeError(LookupError):
       '''Barcode missing in lane where required for demultiplexing.'''
 
 def CleanRow(rec, sample_count, dirname):
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
     # drop commas 
     dr = {'Lane' : EraseCommas(str(rec[1])),
                 'Sample_ID' : EraseCommas(rec[2]),
@@ -38,46 +34,25 @@ def CleanRow(rec, sample_count, dirname):
         dr[k] = dr[k].strip() 
             
     # If lane has a single sample, don't write its barcode.
-<<<<<<< HEAD
-    if sample_count[lane] == 1:
-        dr['index'] = ''
-        dr['index2'] = ''
-    
-    row  = [dr['Lane'],dr['Sample_ID'],
-            dr['Sample_ID'],dr['Sample_Project'],
-=======
     lane = rec[1]
     if sample_count[lane] == 1:
         dr['index'] = ''
         dr['index2'] = ''
     elif sample_count[lane] > 1 and not len(dr['index']):
         raise MissingBarcodeError('Multiple samples in lane but missing barcode for sample: ' + dr['Sample_ID'])
-    
+
+    # Drop potential trailing integers on sequence request number 
+    # e.g. 1480R1 -> 14806R
+    # still works on clean sequence request number
+    dr['Sample_Project'] = dr['Sample_Project'].split('R')[0] + 'R'
+
     row  = [dr['Lane'],dr['Sample_ID'],
             '_'.join([dr['Sample_ID'],dirname]),
             dr['Sample_Project'],
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
             dr['index'],dr['index2']]
     return(row)
 
 class IEMSampleSheetCreator:
-<<<<<<< HEAD
-	
-	def __init__( self, rundirectory, lanes=[] ):
-		self.dirname = rundirectory
-		self.id = self.dirname.split('/')[-1]
-		self.lanes = lanes[:]
-
-	def log( self, values ):
-		sys.stderr.write(" ".join(values) + "\n")
-    
-    def CreateSampleSheet(self):
-		"""
-         1. Query GNomEx DB. 
-         2. Write out a config file (i.e. sample sheet) in the style of        
-         Illumina Experiment Manager. 
-		"""
-=======
     def __init__( self, rundirectory, lanes=[] ):
         self.dirname = rundirectory
         self.id = self.dirname.split('/')[-1]
@@ -90,17 +65,11 @@ class IEMSampleSheetCreator:
         2. Write out a config file (i.e. sample sheet) in the style of        
         Illumina Experiment Manager. 
         """
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
         # Select lanes from flow cell that are bar coded.
         g = hcidemux.gnomex.GNomExConnection()
         connection = g.GnConnect(params.db_user,params.db_password,asdict=False)
         c = connection.cursor()
-<<<<<<< HEAD
-        try:
-            query = """select flowcell.barcode,
-=======
         query = """select flowcell.barcode,
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
             flowcellchannel.number,
             sample.number,
             genomebuild.genomebuildname,
@@ -119,14 +88,6 @@ class IEMSampleSheetCreator:
             join request on sequencelane.idrequest = request.idrequest
             join appuser on request.idappuser = appuser.idappuser
             where flowcellchannel.filename = '%s'\n""" % self.id
-<<<<<<< HEAD
-            if self.lanes:
-                # Append lane selection to where clause.
-                query += "and flowcellchannel.number in (%s)\n" % str(','.join(map(str,self.lanes)))
-            query += "order by flowcellchannel.number, sample.number;"
-            #print query
-            c.execute(query)
-=======
         if self.lanes:
           # Append lane selection to where clause.
           query += "and flowcellchannel.number in (%s)\n" % str(','.join(map(str,self.lanes)))
@@ -134,7 +95,6 @@ class IEMSampleSheetCreator:
 
         try:
           c.execute(query)
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
         except pymssql.OperationError:
 			sys.stderr.write( query )
 			raise
@@ -142,10 +102,6 @@ class IEMSampleSheetCreator:
 		# Open file
 		#ofs = open(samplesheet_fname,'w')
         ofs = sys.stdout
-<<<<<<< HEAD
-        header = ['FCID','Lane','SampleID','SampleRef','Index','Description','Control','Recipe','Operator','SampleProject']
-=======
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
         raw_date = dt.date.today()
         todays_date = '/'.join([str(raw_date.month),str(raw_date.day),str(raw_date.year)])
         # Figure out instrument from RunInfo.xml later.
@@ -184,16 +140,8 @@ class IEMSampleSheetCreator:
         # Write the results.
         nrecords = len(results) - 1
         for i,rec in enumerate(results):
-<<<<<<< HEAD
-            row = CleanRow(rec)
-            if i == nrecords:
-                ofs.write(','.join(row))
-            else:
-                ofs.write(','.join(row) + '\n')
-=======
             row = CleanRow(rec, sample_count, self.dirname)
             ofs.write(','.join(row) + '\n')
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
          
         # Check if this is a rapid run. This will be the case
         # if the flow cell is registered as a single lane, but there
@@ -205,18 +153,9 @@ class IEMSampleSheetCreator:
             # Write the results.
             nrecords = len(results) - 1
             for i,rec in enumerate(results):
-<<<<<<< HEAD
-                row = CleanRow(rec)
-                row[0] = 2
-                if i == nrecords:
-                    ofs.write(','.join(row))
-                else:
-                    ofs.write(','.join(row) + '\n')
-=======
                 row = CleanRow(rec, sample_count)
                 row[0] = 2
                 ofs.write(','.join(row) + '\n')
->>>>>>> cef293c24a85643407e96101450cc4534c505da6
                 
         # Close database.
         connection.close()
