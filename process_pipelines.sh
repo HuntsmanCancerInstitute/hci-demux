@@ -7,6 +7,8 @@ mkdir -p $HOME/Pipeline/logs
 
 # Execute the demultiplexing pipelines. This will create the run database
 # if it doesn't exist already.
+
+module load python/2.7.3
 python ./execute_pipeline.py >> `date +$HOME/Pipeline/logs/pipeline.log.\%Y-\%m-\%d` 2>&1
 
 # Clean out the database of any runs that don't exist anymore.
