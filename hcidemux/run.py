@@ -393,7 +393,7 @@ class Run(Emailer,SimultaneousJobRunner):
         Illumina Experiment Manager. 
         """
         # Select lanes from flow cell that are bar coded.
-        g = hcidemux.gnomex.GNomExConnection()
+        g = gnomex.GNomExConnection()
         connection = g.GnConnect(params.db_user,params.db_password,asdict=False)
         c = connection.cursor()
         query = """select flowcell.barcode,
@@ -432,8 +432,8 @@ class Run(Emailer,SimultaneousJobRunner):
         ofs = open(samplesheet_fname,'w')
         # ofs = sys.stdout
 
-        raw_date = dt.date.today()
-        todays_date = '/'.join([str(raw_date.month),str(raw_date.day),str(raw_date.year)])
+        # raw_date = dt.date.today()
+        # todays_date = '/'.join([str(raw_date.month),str(raw_date.day),str(raw_date.year)])
         
         # Figure out instrument from RunInfo.xml later.
         # header = [('IEMFileVersion', '4'), 
