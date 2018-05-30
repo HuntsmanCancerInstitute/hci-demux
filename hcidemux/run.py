@@ -191,14 +191,13 @@ class Run(Emailer,SimultaneousJobRunner):
 			return True
 		return False
 
-	def MakeSampleSheet( self ):		
-        #self.sample_sheet = self.CreateSampleSheet()
-        self.sample_sheet = self.CreateIEMSampleSheet()                
-        if self.sample_sheet is None:
-            self.Log(["PROBLEM! Can't locate or create sample sheet .csv file in", self.dirname, "for barcoded run", self.id] )
-            return False
-        return True
-	
+	def MakeSampleSheet( self ):
+		self.sample_sheet = self.CreateIEMSampleSheet()
+		if self.sample_sheet is None:
+			self.Log(["PROBLEM! Can't locate or create sample sheet .csv file in", self.dirname, "for barcoded run", self.id] )
+			return False
+		return True
+    
 	def ReadLengths( self ):
 		"""
 		Returns a tuple with the lengths of each read in the run 
