@@ -218,7 +218,25 @@ class Run(Emailer,SimultaneousJobRunner):
         e=doc.getElementsByTagName("Flowcell")[0]
         flowcell=e.firstChild.nodeValue
         return flowcell
-
+    def CallBcl2FastqV2 ( self, mismatches=1,proc_threads=38):
+        
+       self.Log(["Running bcl2fastq (version 2) on run", self.id])
+       child_dir=self.dirname
+       output_dir = os.path.join( self.dirname, "Unaligned" )
+       child_stdout=open(os.path.join(child_dir,"bcltofastq.out"),'w')
+       child_stderr=open(os.path.join(child_dir,"bcltofastq.err"),'w')
+       child_args=[os.path.join(params.bcl2fastq_dir,"bcl2fastq"),
+                   "--runfolder-dir",self.dirname,
+                   "--output-dir",output_dir,
+                   "--barcode-mismatches",`mismatches`,
+                   "--processing-threads", `proc_threads`]
+       print(" ".join(child_args))
+       p = subprocess.Popen(args=child_args,cwd=child_dir,stdout=child_stdout,stderr=child_stderr)
+       retval = p.wait()
+       child_stdout.close()
+       child_stderr.close()
+       return retval == 0
+       
     def BclConvert( self, sample_sheet=None, output_dir=None, use_bases_mask=None, compress_bcls=True, mismatches=1 ):
         """Converts the bcl files into compressed Fastq."""
         # Generate a sample sheet if it is not already present.
