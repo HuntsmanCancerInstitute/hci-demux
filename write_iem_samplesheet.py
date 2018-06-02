@@ -105,13 +105,11 @@ class IEMSampleSheetCreator:
         raw_date = dt.date.today()
         todays_date = '/'.join([str(raw_date.month),str(raw_date.day),str(raw_date.year)])
         # Figure out instrument from RunInfo.xml later.
-        header = [('IEMFileVersion', '4'), 
+        header = [ 
                   ('Date', todays_date),
                   ('Workflow', 'GenerateFASTQ'),
-                  ('Application', 'HiSeq FASTQ Only'),
-                  ('Assay', 'TruSeq HT'),
-                  ('Description', ''),
-                  ('Chemistry', 'Amplicon')]
+                  ('Application', 'FASTQ Only'),
+                  ]
         ofs.write('[Header]\n')
         for k,v in header: 
             ofs.write(str(k) + ',' + str(v) + '\n')

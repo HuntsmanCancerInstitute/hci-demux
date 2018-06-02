@@ -451,7 +451,7 @@ class Run(Emailer,SimultaneousJobRunner):
         # settings = [('Adapter',''),
         #            ('AdapterRead2','')]
         
-        ofs.write('\n[Data]\n')
+        ofs.write('[Data]\n')
         data_cols = ['Lane','Sample_ID','Sample_Name','Sample_Project','index','index2']
         ofs.write(','.join(data_cols) + '\n')
         
@@ -468,7 +468,7 @@ class Run(Emailer,SimultaneousJobRunner):
             except KeyError:
                 sample_count[lane] = 1
         
-        def CleanRow(rec, sample_count, dirname):
+        def CleanRow(rec, sample_count, runid):
             # drop commas 
             dr = {'Lane' : EraseCommas(str(rec[1])),
                   'Sample_ID' : EraseCommas(rec[2]),
@@ -494,7 +494,7 @@ class Run(Emailer,SimultaneousJobRunner):
             dr['Sample_Project'] = dr['Sample_Project'].split('R')[0] + 'R'
             
             row  = [dr['Lane'],dr['Sample_ID'],
-                    '_'.join([dr['Sample_ID'],dirname]),
+                    '_'.join([dr['Sample_ID'],runid]),
                     dr['Sample_Project'],
                     dr['index'],dr['index2']]
             return(row)       
@@ -502,7 +502,7 @@ class Run(Emailer,SimultaneousJobRunner):
         # Write the results.
         nrecords = len(results) - 1
         for i,rec in enumerate(results):
-            row = CleanRow(rec, sample_count, self.dirname)
+            row = CleanRow(rec, sample_count, self.id)
             ofs.write(','.join(row) + '\n')
          
         # Check if this is a rapid run. This will be the case
