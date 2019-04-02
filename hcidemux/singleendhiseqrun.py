@@ -31,7 +31,7 @@ class SEHiSeqRun(HiSeqRun):
             #    States.distribute_demultiplexed,
             #    States.error_detected),
              States.simple_bcl_convert: (HiSeqRun.CallBcl2FastqV2,
-                States.States.complete,
+                States.complete,
                 States.error_detected),
             States.complex_bcl_convert: (HiSeqRun.BclConvertComplex,
                 States.merge_bcl_conversions,

@@ -218,7 +218,7 @@ class Run(Emailer,SimultaneousJobRunner):
         e=doc.getElementsByTagName("Flowcell")[0]
         flowcell=e.firstChild.nodeValue
         return flowcell
-    def CallBcl2FastqV2 ( self, mismatches=1,proc_threads=38):
+    def CallBcl2FastqV2 ( self, mismatches=1,proc_threads=21):
         
        self.Log(["Running bcl2fastq (version 2) on run", self.id])
        child_dir=self.dirname
